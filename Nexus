@@ -1,17 +1,25 @@
-Nexus V1
+--[[
+    NEXUS UI v1.2
+    Modern premium Roblox UI library for executor environments.
+    UI framework only: no gameplay automation or remote-event functionality.
+
     Usage:
         local Nexus = loadstring(readfile("Nexus.lua"))()
         local Window = Nexus:CreateWindow({
             Title = "My Hub",
             Subtitle = "NEXUS UI",
             Theme = "Midnight",
-            ConfigFolder = "NexusConfigs"
+            ConfigFolder = "NexusConfigs",
+            OpenAnimation = "Scale", -- Scale, Slide, Fade, None
+            CloseAnimation = "Fade", -- Scale, Slide, Fade, None
+            AnimationDuration = 0.25
         })
 
         local Main = Window:Tab("Main")
         local Section = Main:Section("General")
-        Section:Button({Name="Example", Callback=function() print("Clicked") end})
-        Section:Toggle({Name="Enabled", Default=false, Callback=function(v) print(v) end})
+        Section:Button({Name="Example", Icon=123456789, Image=987654321, Callback=function() print("Clicked") end})
+        Section:Button({Name="Card action", Style="Card", Description="A large clickable row", Image=123456789, Callback=function() print("Card") end})
+        Section:Toggle({Name="Enabled", Style="Card", Description="A rectangle toggle", Icon=123456789, Default=false, Callback=function(v) print(v) end})
         Section:Slider({Name="Amount", Min=0, Max=100, Default=50, Callback=function(v) print(v) end})
         Section:Dropdown({Name="Mode", Options={"A","B","C"}, Default="A", Callback=function(v) print(v) end})
         Section:Textbox({Name="Text", Default="", Placeholder="Type here...", Callback=function(v) print(v) end})
@@ -27,7 +35,7 @@ local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 
 local Nexus = {}
-Nexus.Version = "1.0.0"
+Nexus.Version = "1.2.0"
 
 local Themes = {
     Midnight = {
@@ -107,23 +115,68 @@ local function tween(object, info, properties)
     return t
 end
 
-local function safeCallback(callback, ...)
-    if type(callback) == "function" then
-        task.spawn(function()
-            local ok, err = pcall(callback, ...)
-            if not ok then warn("[NEXUS UI] Callback error:", err) end
-        end)
+local function normalizeImage(image)
+    if image == nil then return nil end
+    if type(image) == "number" then
+        return "rbxassetid://" .. tostring(image)
     end
+    if type(image) ~= "string" or image == "" then return nil end
+    if image:match("^%d+$") then
+        return "rbxassetid://" .. image
+    end
+    return image
+end
+
+local function addImage(parent, image, size, position, zIndex)
+    local asset = normalizeImage(image)
+    if not asset then return nil end
+    return make("ImageLabel", {
+        Name = "NexusIcon",
+        BackgroundTransparency = 1,
+        Image = asset,
+        ScaleType = Enum.ScaleType.Fit,
+        Size = size or UDim2.fromOffset(18, 18),
+        Position = position or UDim2.fromOffset(8, 8),
+        ZIndex = zIndex or 2
+    }, parent)
+end
+
+local function safeCallback(callback, ...)
+    if type(callback) ~= "function" then
+        return
+    end
+
+    -- Pack arguments before entering the spawned function.
+    local args = table.pack(...)
+
+    task.spawn(function()
+        local ok, err = pcall(function()
+            callback(table.unpack(args, 1, args.n))
+        end)
+
+        if not ok then
+            warn("[NEXUS UI] Callback error:", err)
+        end
+    end)
 end
 
 local function getParent()
-    if typeof(gethui) == "function" then
+    -- Prefer the executor's hidden UI container when available.
+    if type(gethui) == "function" then
         local ok, result = pcall(gethui)
-        if ok and result then return result end
+        if ok and typeof(result) == "Instance" then
+            return result
+        end
     end
-    if game:GetService("CoreGui") then
+
+    -- CoreGui may exist but may reject parenting in some environments.
+    local ok, coreGui = pcall(function()
         return game:GetService("CoreGui")
+    end)
+    if ok and coreGui then
+        return coreGui
     end
+
     return LocalPlayer:WaitForChild("PlayerGui")
 end
 
@@ -164,26 +217,53 @@ function Nexus:CreateWindow(options)
     local tabs = {}
     local activeTab
     local windowVisible = true
+    local Window = {}
+    local animationBusy = false
+    local animationDuration = math.clamp(tonumber(options.AnimationDuration) or 0.22, 0.05, 1.5)
+    local defaultOpenAnimation = options.OpenAnimation or "Scale"
+    local defaultCloseAnimation = options.CloseAnimation or "Scale"
+
+    -- Fit the default window to the current screen, especially on phones.
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+    local windowWidth = math.max(280, math.min(650, viewport.X - 24))
+    local windowHeight = math.max(220, math.min(440, viewport.Y - 48))
+    local defaultWindowSize = options.Size or UDim2.fromOffset(windowWidth, windowHeight)
+    local compactLayout = UserInputService.TouchEnabled and viewport.X < 600
+    local sidebarWidth = compactLayout and math.clamp(math.floor(windowWidth * 0.30), 90, 120) or 150
 
     local screen = make("ScreenGui", {
         Name = "NEXUS_UI_" .. tostring(math.random(1000, 9999)),
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
         ResetOnSpawn = false
     })
-    pcall(function() screen.Parent = getParent() end)
-    if not screen.Parent then screen.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+    local parentOk = pcall(function()
+        screen.Parent = getParent()
+    end)
+    if not parentOk or not screen.Parent then
+        local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+        screen.Parent = playerGui
+    end
+    if not screen.Parent then
+        error("[NEXUS UI] Could not parent ScreenGui to an available UI container")
+    end
 
     local root = make("Frame", {
         Name = "Root",
         AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0.5, 0.5),
-        Size = options.Size or UDim2.fromOffset(650, 440),
+        Size = defaultWindowSize,
         BackgroundColor3 = theme.Background,
         BorderSizePixel = 0
     }, screen)
     corner(root, 13)
     local rootStroke = stroke(root, theme.Stroke)
-    make("UISizeConstraint", {MinSize = Vector2.new(340, 280), MaxSize = Vector2.new(1000, 800)}, root)
+    local rootScale = make("UIScale", {Scale = 1}, root)
+    make("UISizeConstraint", {
+        MinSize = Vector2.new(math.min(280, windowWidth), math.min(220, windowHeight)),
+        MaxSize = Vector2.new(1000, 800)
+    }, root)
 
     local top = make("Frame", {
         Name = "Topbar",
@@ -213,7 +293,9 @@ function Nexus:CreateWindow(options)
         BorderSizePixel = 0, AutoButtonColor = false
     }, top)
     corner(close, 8)
-    close.MouseButton1Click:Connect(function() screen:Destroy() end)
+    close.MouseButton1Click:Connect(function()
+        if Window.Close then Window:Close() else screen:Destroy() end
+    end)
 
     local minimize = make("TextButton", {
         Text = "–", TextSize = 20, Font = Enum.Font.Gotham,
@@ -231,7 +313,7 @@ function Nexus:CreateWindow(options)
 
     local sidebar = make("Frame", {
         Position = UDim2.fromOffset(12, 12),
-        Size = UDim2.new(0, 150, 1, -24),
+        Size = UDim2.new(0, sidebarWidth, 1, -24),
         BackgroundColor3 = theme.Surface,
         BorderSizePixel = 0
     }, body)
@@ -251,8 +333,8 @@ function Nexus:CreateWindow(options)
     end)
 
     local content = make("Frame", {
-        Position = UDim2.new(0, 174, 0, 12),
-        Size = UDim2.new(1, -186, 1, -24),
+        Position = UDim2.new(0, sidebarWidth + 24, 0, 12),
+        Size = UDim2.new(1, -(sidebarWidth + 36), 1, -24),
         BackgroundTransparency = 1
     }, body)
 
@@ -295,7 +377,11 @@ function Nexus:CreateWindow(options)
         end
     end
 
-    local function makeSection(tab, title)
+    local function makeSection(tab, title, sectionIcon)
+        if type(title) == "table" then
+            sectionIcon = title.Icon or sectionIcon
+            title = title.Name or title.Title or "Section"
+        end
         local sectionFrame = make("Frame", {
             BackgroundColor3 = theme.Surface,
             BorderSizePixel = 0,
@@ -305,8 +391,11 @@ function Nexus:CreateWindow(options)
         corner(sectionFrame, 10)
         stroke(sectionFrame, theme.Stroke)
         local heading = makeLabel(sectionFrame, title or "Section", 12, theme.Text, Enum.Font.GothamBold)
-        heading.Position = UDim2.fromOffset(12, 7)
-        heading.Size = UDim2.new(1, -24, 0, 22)
+        heading.Position = UDim2.fromOffset(sectionIcon and 36 or 12, 7)
+        heading.Size = UDim2.new(1, sectionIcon and -48 or -24, 0, 22)
+        if sectionIcon then
+            addImage(sectionFrame, sectionIcon, UDim2.fromOffset(18, 18), UDim2.fromOffset(12, 9), 3)
+        end
         local holder = make("Frame", {
             Position = UDim2.fromOffset(10, 34),
             Size = UDim2.new(1, -20, 0, 0),
@@ -336,39 +425,129 @@ function Nexus:CreateWindow(options)
 
         function Section:Button(opts)
             opts = opts or {}
-            local row, label = rowBase(opts.Name or "Button")
+            local style = string.lower(tostring(opts.Style or "Button"))
+            local isCard = style == "card" or style == "rectangle"
+
+            if isCard then
+                local card = make("TextButton", {
+                    Name = opts.Name or "ActionCard",
+                    Text = "",
+                    Size = UDim2.new(1, 0, 0, opts.Height or 58),
+                    BackgroundColor3 = theme.Surface2,
+                    BorderSizePixel = 0,
+                    AutoButtonColor = false
+                }, holder)
+                corner(card, 9)
+                local icon = opts.Image or opts.Icon
+                if icon then
+                    addImage(card, icon, UDim2.fromOffset(30, 30), UDim2.fromOffset(12, 14), 3)
+                end
+                local textX = icon and 52 or 12
+                local titleLabel = makeLabel(card, opts.Name or "Action", 12, theme.Text, Enum.Font.GothamBold)
+                titleLabel.Position = UDim2.fromOffset(textX, opts.Description and 7 or 0)
+                titleLabel.Size = UDim2.new(1, -textX - 34, 1, opts.Description and -18 or 0)
+                if opts.Description then
+                    local description = makeLabel(card, opts.Description, 10, theme.Muted, Enum.Font.Gotham)
+                    description.Position = UDim2.fromOffset(textX, 30)
+                    description.Size = UDim2.new(1, -textX - 34, 0, 18)
+                end
+                local arrow = makeLabel(card, "›", 22, theme.Muted, Enum.Font.Gotham)
+                arrow.TextXAlignment = Enum.TextXAlignment.Center
+                arrow.Position = UDim2.new(1, -30, 0, 0)
+                arrow.Size = UDim2.new(0, 22, 1, 0)
+                card.MouseButton1Click:Connect(function()
+                    tween(card, TweenInfo.new(0.08), {BackgroundColor3 = theme.Stroke})
+                    task.delay(0.1, function()
+                        if card.Parent then tween(card, TweenInfo.new(0.12), {BackgroundColor3 = theme.Surface2}) end
+                    end)
+                    safeCallback(opts.Callback)
+                end)
+                table.insert(controls, {RefreshTheme = function(t)
+                    card.BackgroundColor3 = t.Surface2
+                    titleLabel.TextColor3 = t.Text
+                    arrow.TextColor3 = t.Muted
+                end})
+                return card
+            end
+
+            local row, label = rowBase(opts.Name or "Button", opts.Height or 38)
+            if opts.Icon then
+                addImage(row, opts.Icon, UDim2.fromOffset(18, 18), UDim2.fromOffset(10, 10), 3)
+                label.Position = UDim2.fromOffset(36, 0)
+                label.Size = UDim2.new(1, -132, 1, 0)
+            end
+            local hasImage = normalizeImage(opts.Image) ~= nil
+            local buttonWidth = hasImage and 104 or 86
             local button = make("TextButton", {
                 Text = opts.Text or "Run",
                 TextSize = 11, Font = Enum.Font.GothamSemibold,
                 TextColor3 = theme.OnAccent, BackgroundColor3 = theme.Accent,
-                Size = UDim2.fromOffset(86, 26), Position = UDim2.new(1, -96, 0.5, -13),
-                BorderSizePixel = 0, AutoButtonColor = false
+                Size = UDim2.fromOffset(buttonWidth, 26), Position = UDim2.new(1, -(buttonWidth + 10), 0.5, -13),
+                BorderSizePixel = 0, AutoButtonColor = false,
+                TextXAlignment = hasImage and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
             }, row)
             corner(button, 7)
+            if hasImage then
+                addImage(button, opts.Image, UDim2.fromOffset(18, 18), UDim2.fromOffset(7, 4), 4)
+                make("UIPadding", {PaddingLeft = UDim.new(0, 30), PaddingRight = UDim.new(0, 4)}, button)
+            end
             button.MouseButton1Click:Connect(function()
                 tween(button, TweenInfo.new(0.08), {BackgroundTransparency = 0.25})
                 task.delay(0.1, function() if button.Parent then tween(button, TweenInfo.new(0.12), {BackgroundTransparency = 0}) end end)
                 safeCallback(opts.Callback)
             end)
-            table.insert(controls, {RefreshTheme = function(t) row.BackgroundColor3 = t.Surface2; label.TextColor3 = t.Text; button.BackgroundColor3 = t.Accent; button.TextColor3 = t.OnAccent end})
+            table.insert(controls, {RefreshTheme = function(t)
+                row.BackgroundColor3 = t.Surface2
+                label.TextColor3 = t.Text
+                button.BackgroundColor3 = t.Accent
+                button.TextColor3 = t.OnAccent
+            end})
             return button
         end
 
         function Section:Toggle(opts)
             opts = opts or {}
             local value = opts.Default == true
-            local row, label = rowBase(opts.Name or "Toggle")
+            local style = string.lower(tostring(opts.Style or "Switch"))
+            local isCard = style == "card" or style == "rectangle"
+            local row, label = rowBase(opts.Name or "Toggle", isCard and (opts.Height or 62) or 38)
+            if opts.Icon then
+                addImage(row, opts.Icon, UDim2.fromOffset(20, 20), UDim2.fromOffset(10, isCard and 20 or 9), 3)
+                label.Position = UDim2.fromOffset(38, isCard and 5 or 0)
+                label.Size = UDim2.new(1, -100, 0, isCard and 24 or 38)
+            elseif isCard then
+                label.Position = UDim2.fromOffset(12, 5)
+                label.Size = UDim2.new(1, -80, 0, 24)
+            end
+            if isCard and opts.Description then
+                local description = makeLabel(row, opts.Description, 10, theme.Muted, Enum.Font.Gotham)
+                description.Position = UDim2.fromOffset(opts.Icon and 38 or 12, 31)
+                description.Size = UDim2.new(1, -95, 0, 22)
+            end
+            local cardHit
+            if isCard then
+                cardHit = make("TextButton", {
+                    Name = "CardHitbox",
+                    Text = "",
+                    BackgroundTransparency = 1,
+                    Size = UDim2.fromScale(1, 1),
+                    ZIndex = 1,
+                    AutoButtonColor = false
+                }, row)
+            end
             local switch = make("TextButton", {
                 Text = "", Size = UDim2.fromOffset(38, 21),
                 Position = UDim2.new(1, -49, 0.5, -10),
                 BackgroundColor3 = value and theme.Accent or theme.Stroke,
-                BorderSizePixel = 0, AutoButtonColor = false
+                BorderSizePixel = 0, AutoButtonColor = false,
+                ZIndex = 3
             }, row)
             corner(switch, 20)
             local knob = make("Frame", {
                 Size = UDim2.fromOffset(15, 15),
                 Position = value and UDim2.new(1, -18, 0.5, -7) or UDim2.fromOffset(3, 3),
-                BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0
+                BackgroundColor3 = Color3.new(1,1,1), BorderSizePixel = 0,
+                ZIndex = 4
             }, switch)
             corner(knob, 20)
             local item = {Type="Toggle", Value=value, Name=opts.Name}
@@ -380,8 +559,16 @@ function Nexus:CreateWindow(options)
                 if fire then safeCallback(opts.Callback, value) end
             end
             switch.MouseButton1Click:Connect(function() set(not value, true) end)
+            if cardHit then
+                cardHit.MouseButton1Click:Connect(function() set(not value, true) end)
+            end
             item.Set = function(v) set(v, true) end
-            item.RefreshTheme = function(t) row.BackgroundColor3=t.Surface2; label.TextColor3=t.Text; switch.BackgroundColor3=value and t.Accent or t.Stroke end
+            item.Get = function() return value end
+            item.RefreshTheme = function(t)
+                row.BackgroundColor3=t.Surface2
+                label.TextColor3=t.Text
+                switch.BackgroundColor3=value and t.Accent or t.Stroke
+            end
             table.insert(controls, item)
             return item
         end
@@ -412,14 +599,37 @@ function Nexus:CreateWindow(options)
                 valueLabel.Text = tostring(value)
                 if fire then safeCallback(opts.Callback, value) end
             end
+            local mouseDragging = false
+            local activeTouch = nil
+
             hit.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    mouseDragging = true
+                    setFromX(input.Position.X, true)
+                elseif input.UserInputType == Enum.UserInputType.Touch then
+                    activeTouch = input
+                    setFromX(input.Position.X, true)
+                    input.Changed:Connect(function()
+                        if input.UserInputState == Enum.UserInputState.End and activeTouch == input then
+                            activeTouch = nil
+                        end
+                    end)
+                end
+            end)
+
+            UserInputService.InputChanged:Connect(function(input)
+                if mouseDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+                    setFromX(input.Position.X, true)
+                elseif activeTouch and input == activeTouch then
                     setFromX(input.Position.X, true)
                 end
             end)
-            UserInputService.InputChanged:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
-                    if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then setFromX(input.Position.X, true) end
+
+            UserInputService.InputEnded:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                    mouseDragging = false
+                elseif input == activeTouch then
+                    activeTouch = nil
                 end
             end)
             item.Set = function(v) value=math.clamp(v,min,max); item.Value=value; setFromX(bar.AbsolutePosition.X + ((value-min)/math.max(max-min,0.0001))*bar.AbsoluteSize.X, true) end
@@ -523,9 +733,11 @@ function Nexus:CreateWindow(options)
         return Section
     end
 
-    local Window = {}
-
-    function Window:Tab(name)
+    function Window:Tab(name, icon)
+        if type(name) == "table" then
+            icon = name.Icon or icon
+            name = name.Name or name.Title or "Tab"
+        end
         local page = make("ScrollingFrame", {
             Name = tostring(name),
             Size = UDim2.fromScale(1,1),
@@ -545,9 +757,14 @@ function Nexus:CreateWindow(options)
             TextSize = 12, Font = Enum.Font.GothamSemibold,
             TextColor3 = theme.Muted, BackgroundColor3 = theme.Surface2,
             Size = UDim2.new(1,0,0,35), BorderSizePixel = 0,
-            AutoButtonColor = false
+            AutoButtonColor = false,
+            TextXAlignment = icon and Enum.TextXAlignment.Left or Enum.TextXAlignment.Center
         }, tabList)
         corner(tabButton, 7)
+        if icon then
+            addImage(tabButton, icon, UDim2.fromOffset(17, 17), UDim2.fromOffset(8, 9), 3)
+            make("UIPadding", {PaddingLeft = UDim.new(0, 31), PaddingRight = UDim.new(0, 3)}, tabButton)
+        end
         local tab = {Name=name, Page=page, Button=tabButton}
         table.insert(tabs,tab)
         tabButton.MouseButton1Click:Connect(function() setTab(tab) end)
@@ -557,7 +774,7 @@ function Nexus:CreateWindow(options)
         tabButton.MouseLeave:Connect(function()
             if tab ~= activeTab then tween(tabButton,TweenInfo.new(0.12),{BackgroundColor3=theme.Surface2}) end
         end)
-        function tab:Section(title) return makeSection(tab,title) end
+        function tab:Section(title, sectionIcon) return makeSection(tab,title,sectionIcon) end
         if not activeTab then setTab(tab) end
         return tab
     end
@@ -648,9 +865,149 @@ function Nexus:CreateWindow(options)
         return true
     end
 
-    function Window:Toggle()
-        windowVisible=not windowVisible
-        root.Visible=windowVisible
+    local function collectFadeTargets()
+        local records = {}
+        local objects = {root}
+        for _, descendant in ipairs(root:GetDescendants()) do
+            table.insert(objects, descendant)
+        end
+        for _, object in ipairs(objects) do
+            local properties = {}
+            if object:IsA("GuiObject") then
+                local ok, value = pcall(function() return object.BackgroundTransparency end)
+                if ok then properties.BackgroundTransparency = value end
+                if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+                    properties.TextTransparency = object.TextTransparency
+                end
+                if object:IsA("ImageLabel") or object:IsA("ImageButton") then
+                    properties.ImageTransparency = object.ImageTransparency
+                end
+            elseif object:IsA("UIStroke") then
+                properties.Transparency = object.Transparency
+            end
+            if next(properties) then
+                table.insert(records, {Object = object, Original = properties})
+            end
+        end
+        return records
+    end
+
+    local function fadeObjects(records, target, duration)
+        for _, record in ipairs(records) do
+            if record.Object and record.Object.Parent then
+                local props = {}
+                for property in pairs(record.Original) do props[property] = target end
+                pcall(function()
+                    tween(record.Object, TweenInfo.new(duration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+                end)
+            end
+        end
+    end
+
+    local function restoreFade(records)
+        for _, record in ipairs(records) do
+            if record.Object and record.Object.Parent then
+                pcall(function()
+                    for property, value in pairs(record.Original) do
+                        record.Object[property] = value
+                    end
+                end)
+            end
+        end
+    end
+
+    local function animateWindow(opening, style)
+        style = string.lower(tostring(style or (opening and defaultOpenAnimation or defaultCloseAnimation)))
+        if style == "none" or style == "instant" then
+            root.Visible = opening
+            root.Size = defaultWindowSize
+            root.Position = UDim2.fromScale(0.5, 0.5)
+            rootScale.Scale = 1
+            windowVisible = opening
+            return
+        end
+        if animationBusy then return end
+        animationBusy = true
+        local duration = animationDuration
+        if opening then
+            windowVisible = true
+            root.Visible = true
+            if style == "slide" then
+                root.Position = UDim2.new(0.5, 0, 1.25, 0)
+                tween(root, TweenInfo.new(duration, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {
+                    Position = UDim2.fromScale(0.5, 0.5), Size = defaultWindowSize
+                })
+            elseif style == "fade" then
+                root.Size = defaultWindowSize
+                root.Position = UDim2.fromScale(0.5, 0.5)
+                local records = collectFadeTargets()
+                for _, record in ipairs(records) do
+                    if record.Object and record.Object.Parent then
+                        pcall(function()
+                            for property in pairs(record.Original) do record.Object[property] = 1 end
+                        end)
+                    end
+                end
+                fadeObjects(records, 0, duration)
+            else
+                root.Position = UDim2.fromScale(0.5, 0.5)
+                root.Size = defaultWindowSize
+                rootScale.Scale = 0.72
+                tween(rootScale, TweenInfo.new(duration, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+                    Scale = 1
+                })
+            end
+            task.delay(duration + 0.04, function() animationBusy = false end)
+        else
+            windowVisible = false
+            if style == "slide" then
+                local t = tween(root, TweenInfo.new(duration, Enum.EasingStyle.Quint, Enum.EasingDirection.In), {
+                    Position = UDim2.new(0.5, 0, 1.25, 0)
+                })
+                task.delay(duration + 0.03, function()
+                    root.Visible = false
+                    root.Position = UDim2.fromScale(0.5, 0.5)
+                    root.Size = defaultWindowSize
+                    animationBusy = false
+                end)
+            elseif style == "fade" then
+                local records = collectFadeTargets()
+                fadeObjects(records, 1, duration)
+                task.delay(duration + 0.03, function()
+                    root.Visible = false
+                    restoreFade(records)
+                    animationBusy = false
+                end)
+            else
+                tween(rootScale, TweenInfo.new(duration, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+                    Scale = 0.72
+                })
+                task.delay(duration + 0.03, function()
+                    root.Visible = false
+                    root.Size = defaultWindowSize
+                    rootScale.Scale = 1
+                    animationBusy = false
+                end)
+            end
+        end
+    end
+
+    function Window:Open(animation)
+        if windowVisible and root.Visible and not animationBusy then return end
+        animateWindow(true, animation)
+    end
+
+    function Window:Close(animation)
+        if not windowVisible or not root.Visible or animationBusy then return end
+        animateWindow(false, animation)
+    end
+
+    function Window:SetOpen(state, animation)
+        if state then self:Open(animation) else self:Close(animation) end
+    end
+
+    function Window:Toggle(animation)
+        if windowVisible then self:Close(animation) else self:Open(animation) end
     end
 
     function Window:Destroy()
@@ -658,8 +1015,12 @@ function Nexus:CreateWindow(options)
     end
 
     minimize.MouseButton1Click:Connect(function()
-        body.Visible=not body.Visible
-        root.Size=body.Visible and (options.Size or UDim2.fromOffset(650,440)) or UDim2.new(0,650,0,58)
+        body.Visible = not body.Visible
+        if body.Visible then
+            root.Size = defaultWindowSize
+        else
+            root.Size = UDim2.new(defaultWindowSize.X.Scale, defaultWindowSize.X.Offset, 0, 58)
+        end
     end)
 
     -- Dragging works with mouse and touch.
@@ -680,6 +1041,12 @@ function Nexus:CreateWindow(options)
     end)
 
     self._LastWindow=Window
+
+    if options.AnimateOnCreate ~= false then
+        root.Size = UDim2.fromOffset(0, 0)
+        animateWindow(true, defaultOpenAnimation)
+    end
+
     return Window
 end
 
