@@ -1,8 +1,3 @@
---[[
-    NEXUS UI v1.2
-    Modern premium Roblox UI library for executor environments.
-    UI framework only: no gameplay automation or remote-event functionality.
-
     Usage:
         local Nexus = loadstring(readfile("Nexus.lua"))()
         local Window = Nexus:CreateWindow({
